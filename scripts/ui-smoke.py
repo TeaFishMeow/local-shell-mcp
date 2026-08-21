@@ -20,6 +20,12 @@ from playwright.sync_api import Page, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 TUI_NAME = "local-shell-mcp-tui.exe" if os.name == "nt" else "local-shell-mcp-tui"
 TUI_PATH = ROOT / "ui" / "dist" / TUI_NAME
+ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+ANSI_OSC_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
+
+
+def plain_terminal_text(value: str) -> str:
+    return ANSI_CSI_RE.sub("", ANSI_OSC_RE.sub("", value))
 
 
 def free_port() -> int:
@@ -235,7 +241,7 @@ def wait_for_terminal_output(
         assert response["status"] == 200, response
         output = response["body"]["data"]["output"]
         matched = (
-            any(line.strip() == needle for line in output.splitlines())
+            any(line.strip() == needle for line in plain_terminal_text(output).splitlines())
             if exact_line
             else needle in output
         )
@@ -249,6 +255,21 @@ def wait_for_terminal_output(
 
 def run_browser(port: int) -> None:
     origin = f"http://127.0.0.1:{port}"
+    if os.name == "nt":
+        first_command = "Write-Output 'INPUT-CLEAR-ONE'"
+        second_command = "Write-Output 'INPUT-CLEAR-TWO'"
+        scroll_command = "1..120 | ForEach-Object { 'SCROLL-LINE-{0:D3}' -f $_ }"
+        scroll_command_marker = "SCROLL-LINE-{0:D3}"
+        repeat_command = (
+            "1..40 | ForEach-Object { 'REPEAT-' + ($_ % 2) }; "
+            "Write-Output 'REPEAT-END'"
+        )
+    else:
+        first_command = r"printf 'INPUT-CLEAR-ONE\n'"
+        second_command = r"printf 'INPUT-CLEAR-TWO\n'"
+        scroll_command = "seq -f 'SCROLL-LINE-%03g' 1 120"
+        scroll_command_marker = "SCROLL-LINE-%03g"
+        repeat_command = "for i in $(seq 1 40); do echo REPEAT-$((i % 2)); done; echo REPEAT-END"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 900})
@@ -327,13 +348,22 @@ def run_browser(port: int) -> None:
 
             second_session_id = wait_for_terminal_session(page, second_name, timeout_s=10)
             session_ids.append(second_session_id)
+            session_payload = api_request(page, "/api/ui/terminals?machine=local")
+            ordered_sessions = [
+                session["session_id"] for session in session_payload["body"]["data"]["sessions"]
+            ]
+            switch_to_second = (
+                "Alt+ArrowLeft"
+                if ordered_sessions.index(second_session_id) < ordered_sessions.index(first_session_id)
+                else "Alt+ArrowRight"
+            )
             url_before_switch = page.url
             page.keyboard.press("Alt+ArrowLeft")
             wait_for_selected_terminal(page, second_name, timeout_s=8)
             assert page.url == url_before_switch
             click_tui_label(page, session_name, occurrence=-1)
             wait_for_selected_terminal(page, session_name, timeout_s=8)
-            page.keyboard.press("Alt+ArrowLeft")
+            page.keyboard.press(switch_to_second)
             wait_for_selected_terminal(page, second_name, timeout_s=8)
 
             page.keyboard.press("F8")
@@ -342,14 +372,16 @@ def run_browser(port: int) -> None:
             page.wait_for_timeout(500)
             assert page.locator("#connection-state strong").inner_text() == "Connected"
             wait_for_terminal_text(page, "RAW INPUT")
+            page.locator(".xterm-helper-textarea").focus()
+            page.keyboard.press("Control+C")
+            page.wait_for_timeout(300)
             page.keyboard.press("Alt+1")
             page.wait_for_timeout(500)
             assert "MCP audit · manual input excluded" in page.locator("body").inner_text()
             page.keyboard.press("F8")
             wait_for_terminal_text_absent(page, "RAW INPUT")
             wait_for_terminal_text(page, "Enter a command…")
-
-            page.keyboard.type(r"printf 'INPUT-CLEAR-ONE\n'")
+            page.keyboard.type(first_command)
             wait_for_terminal_text(page, "INPUT-CLEAR-ONE")
             page.keyboard.press("Enter")
             wait_for_terminal_output(
@@ -359,7 +391,7 @@ def run_browser(port: int) -> None:
                 exact_line=True,
             )
             wait_for_terminal_text(page, "Enter a command…")
-            page.keyboard.type(r"printf 'INPUT-CLEAR-TWO\n'")
+            page.keyboard.type(second_command)
             wait_for_terminal_text(page, "INPUT-CLEAR-TWO")
             page.keyboard.press("Enter")
             wait_for_terminal_output(
@@ -370,8 +402,8 @@ def run_browser(port: int) -> None:
             )
             wait_for_terminal_text(page, "Enter a command…")
 
-            page.keyboard.type("seq -f 'SCROLL-LINE-%03g' 1 120")
-            wait_for_terminal_text(page, "SCROLL-LINE-%03g")
+            page.keyboard.type(scroll_command)
+            wait_for_terminal_text(page, scroll_command_marker)
             page.keyboard.press("Enter")
             wait_for_terminal_output(
                 page,
@@ -420,7 +452,7 @@ def run_browser(port: int) -> None:
                 {
                     "machine": "local",
                     "session_id": second_session_id,
-                    "input_text": "for i in $(seq 1 40); do echo REPEAT-$((i % 2)); done; echo REPEAT-END",
+                    "input_text": repeat_command,
                     "enter": True,
                 },
             )
@@ -786,26 +818,48 @@ def main() -> int:
                 for item in (str(ROOT), str(ROOT / "src"), env.get("PYTHONPATH", ""))
                 if item
             )
-        process = subprocess.Popen(  # noqa: S603
-            [sys.executable, "-m", "local_shell_mcp.main", "--mode", "mcp", "--no-remote"],
-            cwd=ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            wait_for_health(port, process)
-            run_browser(port)
-        finally:
-            process.terminate()
+        stdout_path = Path(temp_dir) / "server.stdout.log"
+        stderr_path = Path(temp_dir) / "server.stderr.log"
+        with (
+            stdout_path.open("w", encoding="utf-8") as stdout_log,
+            stderr_path.open("w", encoding="utf-8") as stderr_log,
+        ):
+            process = subprocess.Popen(  # noqa: S603
+                [sys.executable, "-m", "local_shell_mcp.main", "--mode", "mcp", "--no-remote"],
+                cwd=ROOT,
+                env=env,
+                stdout=stdout_log,
+                stderr=stderr_log,
+                text=True,
+            )
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        if process.returncode not in {0, -15}:
-            stdout, stderr = process.communicate()
+                wait_for_health(port, process)
+                run_browser(port)
+            finally:
+                if os.name == "nt":
+                    taskkill = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "taskkill.exe"
+                    subprocess.run(  # noqa: S603
+                        [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                if os.name == "nt":
+                    time.sleep(0.5)
+        expected_returncodes = {0, -15}
+        if os.name == "nt":
+            # taskkill /T /F maps Python's forced Windows termination to 1.
+            expected_returncodes.add(1)
+        if process.returncode not in expected_returncodes:
+            stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
             raise RuntimeError(
                 f"UI smoke server stopped with {process.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
             )

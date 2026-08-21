@@ -367,6 +367,9 @@ if _PYDANTIC_AVAILABLE:
         # Human-facing OpenTUI/WebUI. The browser interface is mounted on the same
         # ASGI service and launches the exact same TUI executable as the local CLI.
         ui_enabled: bool = True
+        # The MCP App-based Live Workspace can be disabled independently while
+        # keeping the regular Web UI available.
+        live_workspace_enabled: bool = True
         ui_path: str = "/ui"
         ui_tui_command: str | None = None
         ui_wallpaper: Literal["bing", "aurora", "none"] = "bing"
@@ -594,6 +597,7 @@ else:
         max_tmux_sessions: int = 16
 
         ui_enabled: bool = True
+        live_workspace_enabled: bool = True
         ui_path: str = "/ui"
         ui_tui_command: str | None = None
         ui_wallpaper: Literal["bing", "aurora", "none"] = "bing"

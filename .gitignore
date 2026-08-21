@@ -15,6 +15,10 @@ workspaces/
 playwright-report/
 test-results/
 node_modules/
+# Local smoke-test state can contain generated OAuth signing material.
+.ctrl-c-smoke-state/
+# MkDocs build output is reproducible and must not be published from a workstation.
+site/
 # VS Code extension local build outputs
 vscode-extension/node_modules/
 vscode-extension/out/

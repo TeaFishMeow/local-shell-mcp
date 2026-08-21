@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +47,10 @@ async def test_run_shell_tool_returns_output_after_command_timeout(tmp_path, mon
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
     get_settings.cache_clear()
 
+    # Windows has to start PowerShell and then the Python child used by this
+    # cross-platform probe. On a busy host, one second can expire before the
+    # child emits either marker, which does not exercise output draining at all.
+    timeout_s = 3 if os.name == "nt" else 1
     response = await build_mcp().call_tool(
         "run_shell",
         {
@@ -53,7 +58,7 @@ async def test_run_shell_tool_returns_output_after_command_timeout(tmp_path, mon
                 'import sys, time; print("partial-out", flush=True); '
                 'print("partial-err", file=sys.stderr, flush=True); time.sleep(5)'
             ),
-            "timeout_s": 1,
+            "timeout_s": timeout_s,
         },
     )
     payload = json.loads(response[0][0].text)
@@ -436,7 +441,7 @@ async def test_tmux_command_uses_selected_binary_and_private_socket(tmp_path, mo
     assert result.ok is True
     assert calls[0][:3] == (["/opt/lsm/tmux", "-L", "lsm-test", "list-sessions"], ".", 5)
     assert calls[0][3]["SHELL"] == "/bin/bash"
-    assert calls[0][4] is False
+    assert calls[0][4] is True
 
 
 @pytest.mark.asyncio

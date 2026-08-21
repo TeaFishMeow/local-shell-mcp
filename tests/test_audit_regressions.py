@@ -365,8 +365,8 @@ async def test_python_and_playwright_tools_honor_configured_interpreter_and_clea
 
     monkeypatch.setattr(tools_module, "run_shell", fake_run)
     await tools_module._run_python("print('x')")
-    expected_python = tools_module.quote_shell_executable("/opt/custom python")
-    assert commands[-1].startswith(f"{expected_python} ")
+    expected_prefix = f"{tools_module.quote_shell_executable('/opt/custom python')} "
+    assert commands[-1].startswith(expected_prefix)
 
     stale = tmp_path / "screenshots" / "page.png"
     stale.parent.mkdir()
@@ -375,7 +375,7 @@ async def test_python_and_playwright_tools_honor_configured_interpreter_and_clea
     result = await playwright_module.browser_capture(
         "https://invalid.test", "screenshots/page.png", capture_format="png"
     )
-    assert commands[-1].startswith("'/opt/custom python' ")
+    assert commands[-1].startswith(expected_prefix)
     assert result["capture_path"] is None
     assert not stale.exists()
 

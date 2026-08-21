@@ -431,6 +431,8 @@ def test_playwright_helpers_and_generated_scripts(tmp_path, monkeypatch):
     custom = asyncio.run(playwright.playwright_run_script("print(1)", cwd=".", timeout_s=2))
     assert custom["script_path"].endswith(".py")
     assert commands[-1][1]["max_output_bytes"] == 1_000_000
+    if os.name == "nt":
+        assert commands[-1][0].startswith("& '")
 
 
 def test_tmux_selection_backend_and_version(tmp_path, monkeypatch):

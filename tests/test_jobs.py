@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -734,7 +735,12 @@ async def test_completed_job_retains_output_and_exit_code(tmp_path, monkeypatch)
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".local-shell-mcp"))
     get_settings.cache_clear()
 
-    job = await start_job("printf 'completed-output\n'; exit 3")
+    command = (
+        "Write-Output 'completed-output'; exit 3"
+        if os.name == "nt"
+        else "printf 'completed-output\n'; exit 3"
+    )
+    job = await start_job(command)
     row = await _wait_for_shell_job_completion(job["job_id"])
 
     assert row["status"] == "failed"
@@ -753,7 +759,12 @@ async def test_job_log_is_bounded_and_reports_truncation(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_SHELL_MCP_MAX_JOB_LOG_BYTES", "32")
     get_settings.cache_clear()
 
-    job = await start_job("python3 -c \"print('x' * 200)\"")
+    if os.name == "nt":
+        python = str(sys.executable).replace("'", "''")
+        command = f"& '{python}' -c \"print('x' * 200)\""
+    else:
+        command = "python3 -c \"print('x' * 200)\""
+    job = await start_job(command)
     row = await _wait_for_shell_job_completion(job["job_id"])
 
     assert row["status"] == "succeeded"

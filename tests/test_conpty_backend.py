@@ -32,6 +32,7 @@ class FakePtyProcess:
         self.writes = []
         self.close_calls = []
         self.sizes = []
+        self.pid = 1234
         FakePtyProcess.spawned.append(self)
 
     @classmethod
@@ -123,6 +124,43 @@ async def test_windows_prefers_conpty_and_supports_session_ops(tmp_path, monkeyp
     assert killed == {"session_id": session["session_id"], "killed": True, "stderr": ""}
     assert FakePtyProcess.spawned[0].close_calls == [True]
     assert await ops.list_shells() == {"sessions": []}
+
+
+@pytest.mark.asyncio
+async def test_conpty_ctrl_c_writes_etx_and_delivers_console_event(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    monkeypatch.setattr(conpty_ops, "winpty", SimpleNamespace(PtyProcess=FakePtyProcess))
+    delivered = []
+    monkeypatch.setattr(
+        conpty_ops,
+        "_send_ctrl_c_event",
+        lambda process: delivered.append(process.pid) or True,
+    )
+
+    session = await conpty_ops.start_shell(name="ctrl-c")
+    process = FakePtyProcess.spawned[0]
+    await conpty_ops.send_shell(session["session_id"], "partial\x03echo alive", enter=True)
+
+    assert process.writes == ["partial", "\x03", "echo alive\r"]
+    assert delivered == [1234]
+
+
+@pytest.mark.asyncio
+async def test_conpty_ctrl_c_falls_back_to_clearing_tracked_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    monkeypatch.setattr(conpty_ops, "winpty", SimpleNamespace(PtyProcess=FakePtyProcess))
+    monkeypatch.setattr(conpty_ops, "_send_ctrl_c_event", lambda process: False)
+
+    session = await conpty_ops.start_shell(name="ctrl-c-fallback")
+    process = FakePtyProcess.spawned[0]
+    await conpty_ops.send_shell(session["session_id"], "partial", enter=False)
+    await conpty_ops.send_shell(session["session_id"], "\x03", enter=False)
+    await conpty_ops.send_shell(session["session_id"], "echo alive", enter=True)
+
+    assert process.writes == ["partial", "\x03", "\b" * 7, "echo alive\r"]
+    assert conpty_ops._CONPTY_SHELL_SESSIONS[session["session_id"]].pending_input == ""
 
 
 @pytest.mark.asyncio

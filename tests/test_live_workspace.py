@@ -1443,6 +1443,29 @@ def test_live_workspace_is_hidden_when_ui_is_disabled(tmp_path, monkeypatch):
         assert client.get("/api/live/snapshot").status_code == 404
 
 
+def test_live_workspace_can_be_disabled_without_hiding_ui(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch, auth="none")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_UI_ENABLED", "true")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_LIVE_WORKSPACE_ENABLED", "false")
+    get_settings.cache_clear()
+    mcp = build_mcp()
+
+    async def inspect_surface():
+        tools = {tool.name for tool in await mcp.list_tools()}
+        resources = {str(resource.uri) for resource in await mcp.list_resources()}
+        return tools, resources
+
+    tools, resources = asyncio.run(inspect_surface())
+    assert "open_live_workspace" not in tools
+    assert "live_workspace_reconnect" not in tools
+    assert LIVE_RESOURCE_URI not in resources
+
+    app = _build_mcp_http_app(mcp)
+    with TestClient(app, base_url="http://testserver") as client:
+        assert client.get("/api/live/snapshot").status_code == 404
+        assert client.get("/ui/").status_code == 200
+
+
 def test_live_workspace_is_hidden_in_stdio_mode(tmp_path, monkeypatch):
     _configure(tmp_path, monkeypatch, auth="none")
     monkeypatch.setenv("LOCAL_SHELL_MCP_MODE", "stdio")

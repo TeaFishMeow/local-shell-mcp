@@ -6,7 +6,12 @@ import uuid
 
 from .fs_ops import prune_temp_dir, relative_display, resolve_path, temp_dir
 from .settings import get_settings
-from .shell_ops import public_run_shell_timeout, quote_shell_argument, run_shell
+from .shell_ops import (
+    public_run_shell_timeout,
+    quote_shell_argument,
+    quote_shell_executable,
+    run_shell,
+)
 
 _VALID_BROWSERS = {"chromium", "firefox", "webkit"}
 _VALID_WAIT_UNTIL = {"load", "domcontentloaded", "networkidle", "commit"}
@@ -38,7 +43,7 @@ async def _run_generated_script(script: str, *, max_output_bytes: int = 500_000)
         encoding="utf-8",
     )
     result = await run_shell(
-        f"{quote_shell_argument(get_settings().python_bin)} "
+        f"{quote_shell_executable(get_settings().python_bin)} "
         f"{quote_shell_argument(str(script_path))}",
         timeout_s=60,
         max_output_bytes=max_output_bytes,
@@ -120,7 +125,7 @@ async def playwright_run_script(script: str, cwd: str = ".", timeout_s: int = 60
     path.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(path.write_text, script, encoding="utf-8")
     result = await run_shell(
-        f"{quote_shell_argument(get_settings().python_bin)} {quote_shell_argument(str(path))}",
+        f"{quote_shell_executable(get_settings().python_bin)} {quote_shell_argument(str(path))}",
         cwd=cwd,
         timeout_s=public_run_shell_timeout(timeout_s),
         max_output_bytes=1_000_000,

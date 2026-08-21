@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import ctypes
 import json
 import logging
 import os
@@ -78,6 +79,57 @@ _CPU_SAMPLE: tuple[int, int] | None = None
 _NETWORK_SAMPLE: tuple[float, int, int] | None = None
 
 
+def _filetime_value(value: Any) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+
+def _read_windows_cpu_times() -> tuple[int, int] | None:
+    if os.name != "nt":
+        return None
+    try:
+        from ctypes import wintypes
+
+        idle = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not ctypes.windll.kernel32.GetSystemTimes(
+            ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            return None
+    except (AttributeError, OSError):
+        return None
+    # Kernel time includes idle time, matching the total/idle shape used for Linux.
+    return _filetime_value(kernel) + _filetime_value(user), _filetime_value(idle)
+
+
+def _read_windows_memory() -> tuple[int, int] | None:
+    if os.name != "nt":
+        return None
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(status)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+    except (AttributeError, OSError):
+        return None
+    total = int(status.ullTotalPhys)
+    return total, max(0, total - int(status.ullAvailPhys))
+
+
 def _read_linux_cpu_times() -> tuple[int, int] | None:
     try:
         fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()
@@ -135,6 +187,8 @@ def _local_system_snapshot() -> dict[str, Any]:
         load_1m = round(float(os.getloadavg()[0]), 2)
 
     cpu_times = _read_linux_cpu_times()
+    if cpu_times is None:
+        cpu_times = _read_windows_cpu_times()
     cpu_percent: float | None = None
     network = _read_linux_network()
     network_rx_bps = network_tx_bps = 0.0
@@ -162,6 +216,8 @@ def _local_system_snapshot() -> dict[str, Any]:
         cpu_percent = round(max(0.0, min(100.0, load_1m * 100.0 / cpu_count)), 1)
 
     memory = _read_linux_memory()
+    if memory is None:
+        memory = _read_windows_memory()
     memory_total = memory[0] if memory else None
     memory_used = memory[1] if memory else None
     try:
@@ -169,8 +225,13 @@ def _local_system_snapshot() -> dict[str, Any]:
     except OSError:
         disk = None
     uptime_s = max(0.0, now - _PROCESS_STARTED_AT)
+    proc_uptime_read = False
     with contextlib.suppress(OSError, ValueError, IndexError):
         uptime_s = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+        proc_uptime_read = True
+    if os.name == "nt" and not proc_uptime_read:
+        with contextlib.suppress(AttributeError, OSError):
+            uptime_s = float(ctypes.windll.kernel32.GetTickCount64()) / 1000.0
 
     return {
         "timestamp": now,
@@ -2379,6 +2440,11 @@ async def ui_terminal_websocket(websocket: WebSocket) -> None:
                 continue
             if not isinstance(control, dict):
                 continue
+            if control.get("type") == "quit":
+                await websocket.close(
+                    code=UI_TUI_EXIT_CODE, reason="TUI exited by browser request"
+                )
+                return
             if control.get("type") == "resize":
                 try:
                     cols = _bounded_int(

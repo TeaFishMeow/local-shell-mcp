@@ -2,6 +2,9 @@ services:
   local-shell-mcp:
     image: fwerkor/local-shell-mcp:latest
     container_name: local-shell-mcp
+    # Run a tiny PID 1 so detached jobs and tool subprocesses are reaped instead of accumulating
+    # zombies during long, highly concurrent sessions.
+    init: true
     restart: unless-stopped
     ports:
       - "127.0.0.1:8765:8765"
@@ -32,6 +35,7 @@ services:
       LOCAL_SHELL_MCP_REMOTE_POLL_TIMEOUT_S: "${LOCAL_SHELL_MCP_REMOTE_POLL_TIMEOUT_S:-25}"
       LOCAL_SHELL_MCP_REMOTE_JOB_TIMEOUT_S: "${LOCAL_SHELL_MCP_REMOTE_JOB_TIMEOUT_S:-3600}"
       LOCAL_SHELL_MCP_UI_ENABLED: "${LOCAL_SHELL_MCP_UI_ENABLED:-true}"
+      LOCAL_SHELL_MCP_LIVE_WORKSPACE_ENABLED: "${LOCAL_SHELL_MCP_LIVE_WORKSPACE_ENABLED:-true}"
       LOCAL_SHELL_MCP_UI_PATH: "${LOCAL_SHELL_MCP_UI_PATH:-/ui}"
       LOCAL_SHELL_MCP_UI_WALLPAPER: "${LOCAL_SHELL_MCP_UI_WALLPAPER:-bing}"
       LOCAL_SHELL_MCP_UI_TERMINAL_IDLE_TIMEOUT_S: "${LOCAL_SHELL_MCP_UI_TERMINAL_IDLE_TIMEOUT_S:-3600}"

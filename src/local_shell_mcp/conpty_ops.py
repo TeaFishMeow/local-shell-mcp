@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import importlib
+import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,6 +33,105 @@ except ImportError:  # pragma: no cover - covered through monkeypatched module s
     winpty = None
 
 _CONPTY_SHELL_SESSIONS: dict[str, ConPtyShellSession] = {}
+_CONSOLE_ATTACH_LOCK = threading.Lock()
+
+
+def _process_pid(process: Any) -> int | None:
+    value = getattr(process, "pid", None)
+    if callable(value):
+        value = value()
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _send_ctrl_c_event(process: Any) -> bool:
+    """Deliver a real Ctrl-C event to a pywinpty ConPTY console."""
+    if os.name != "nt":
+        return False
+    child_pid = _process_pid(process)
+    if child_pid is None:
+        return False
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+    kernel32.FreeConsole.restype = ctypes.c_int
+    kernel32.AttachConsole.argtypes = [ctypes.c_uint32]
+    kernel32.AttachConsole.restype = ctypes.c_int
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.GetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    kernel32.GetConsoleMode.restype = ctypes.c_int
+    kernel32.SetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.SetConsoleMode.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
+    kernel32.GenerateConsoleCtrlEvent.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.GenerateConsoleCtrlEvent.restype = ctypes.c_int
+
+    attach_parent_process = ctypes.c_uint32(-1).value
+    enable_processed_input = 0x0001
+    generic_read_write = 0x80000000 | 0x40000000
+    file_share_read_write = 0x00000001 | 0x00000002
+    open_existing = 3
+    invalid_handle = ctypes.c_void_p(-1).value
+
+    with _CONSOLE_ATTACH_LOCK:
+        had_console = bool(kernel32.GetConsoleWindow())
+        kernel32.FreeConsole()
+        if not kernel32.AttachConsole(child_pid):
+            if had_console:
+                kernel32.AttachConsole(attach_parent_process)
+            return False
+
+        console_input = kernel32.CreateFileW(
+            "CONIN$",
+            generic_read_write,
+            file_share_read_write,
+            None,
+            open_existing,
+            0,
+            None,
+        )
+        original_mode: int | None = None
+        if console_input not in (None, 0, invalid_handle):
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(console_input, ctypes.byref(mode)):
+                original_mode = mode.value
+                if not original_mode & enable_processed_input:
+                    kernel32.SetConsoleMode(console_input, original_mode | enable_processed_input)
+
+        # AttachConsole resets the handler table. Install an explicit handler
+        # (rather than relying on the process-wide NULL ignore flag) so Python's
+        # own console handler cannot terminate the MCP server during delivery.
+        handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint32)
+        ignore_handler = handler_type(lambda event: 1)
+        kernel32.SetConsoleCtrlHandler(ignore_handler, 1)
+        delivered = bool(kernel32.GenerateConsoleCtrlEvent(0, 0))
+        time.sleep(0.005)
+
+        if original_mode is not None and console_input not in (None, 0, invalid_handle):
+            kernel32.SetConsoleMode(console_input, original_mode)
+        if console_input not in (None, 0, invalid_handle):
+            kernel32.CloseHandle(console_input)
+
+        kernel32.FreeConsole()
+        kernel32.SetConsoleCtrlHandler(ignore_handler, 0)
+        if had_console:
+            kernel32.AttachConsole(attach_parent_process)
+        return delivered
 
 
 @dataclass
@@ -54,6 +156,18 @@ class ConPtyShellSession:
     output: TailBuffer
     reader: asyncio.Task[None] | None
     lock: asyncio.Lock
+    pending_input: str = ""
+
+
+def _track_pending_input(current: str, value: str) -> str:
+    for char in value:
+        if char in "\r\n\x03\x15":
+            current = ""
+        elif char in "\b\x7f":
+            current = current[:-1]
+        elif char >= " " and char != "\x7f":
+            current += char
+    return current
 
 
 def is_available() -> bool:
@@ -292,7 +406,27 @@ async def send_shell(session_id: str, input_text: str, enter: bool = True) -> di
     session = await _get_session(session_id)
     data = input_text + ("\r" if enter else "")
     async with session.lock:
-        await asyncio.to_thread(session.process.write, data)
+        parts = data.split("\x03")
+        for index, part in enumerate(parts):
+            if part:
+                await asyncio.to_thread(session.process.write, part)
+                session.pending_input = _track_pending_input(session.pending_input, part)
+            if index < len(parts) - 1:
+                # ConPTY does not always translate ETX into CTRL_C_EVENT after
+                # a raw-mode application changes the console input mode. Send
+                # both forms, matching a real Windows terminal's behavior.
+                await asyncio.to_thread(session.process.write, "\x03")
+                delivered = await asyncio.to_thread(_send_ctrl_c_event, session.process)
+                if not delivered and session.pending_input:
+                    # Native ConPTY consoles cannot be attached on some pywinpty
+                    # builds. ETX still interrupts cooked child processes, but
+                    # raw line editors do not consume it. Replay backspaces for
+                    # the input observed since the last Enter so Ctrl-C retains
+                    # its line-cancel behavior without terminating the shell.
+                    await asyncio.to_thread(
+                        session.process.write, "\b" * len(session.pending_input)
+                    )
+                session.pending_input = ""
     audit(
         "shell_send",
         session=session_id,

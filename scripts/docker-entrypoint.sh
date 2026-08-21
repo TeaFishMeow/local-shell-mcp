@@ -2,6 +2,7 @@
 set -euo pipefail
 
 workspace="${LOCAL_SHELL_MCP_WORKSPACE_ROOT:-/workspace}"
+state_dir="${LOCAL_SHELL_MCP_STATE_DIR:-${workspace}/.local-shell-mcp}"
 allow_full_container="$(printf '%s' "${LOCAL_SHELL_MCP_ALLOW_FULL_CONTAINER:-false}" | tr '[:upper:]' '[:lower:]')"
 persist_credentials="$(printf '%s' "${LOCAL_SHELL_MCP_PERSISTENT_CREDENTIALS:-true}" | tr '[:upper:]' '[:lower:]')"
 credentials_dir="${LOCAL_SHELL_MCP_CREDENTIALS_DIR:-/persist/credentials}"
@@ -118,12 +119,15 @@ setup_persistent_credentials() {
 }
 
 if [ "$(id -u)" = "0" ]; then
-  mkdir -p "$workspace" "$workspace/.local-shell-mcp" "$credentials_dir"
+  mkdir -p "$workspace" "$state_dir" "$credentials_dir"
   if is_truthy "$allow_full_container"; then
     setup_persistent_credentials root /root
     exec "$@"
   fi
   setup_persistent_credentials agent /home/agent
+  # State may be a dedicated bind mount outside the workspace. Hand only that
+  # application-owned directory to the unprivileged runtime user.
+  chown -R agent:agent "$state_dir" 2>/dev/null || true
   if [ "${LOCAL_SHELL_MCP_CHOWN_WORKSPACE:-true}" != "false" ]; then
     chown -R agent:agent "$workspace"
   fi

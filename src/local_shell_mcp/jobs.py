@@ -1564,7 +1564,17 @@ def _runner_shell_args(shell: str, command: str) -> list[str]:
     name = Path(shell).name.lower()
     powershell = "power" + "shell"
     if name in {powershell + ".exe", powershell, "pwsh.exe", "pwsh"}:
-        return [shell, "-NoProfile", "-NonInteractive", "-Command", command]
+        # PowerShell 5.1 otherwise inherits the active Windows console code page for redirected
+        # output. Job logs are UTF-8 on every platform, so force both pipeline encodings before
+        # running the user command to prevent mojibake in localized errors and Unicode output.
+        utf8_command = (
+            "$utf8 = [System.Text.UTF8Encoding]::new($false); "
+            "[Console]::InputEncoding = $utf8; "
+            "[Console]::OutputEncoding = $utf8; "
+            "$OutputEncoding = $utf8; "
+            + command
+        )
+        return [shell, "-NoProfile", "-NonInteractive", "-Command", utf8_command]
     if name in {"cmd.exe", "cmd"}:
         return [shell, "/S", "/C", command]
     return [shell, "-lc", command]

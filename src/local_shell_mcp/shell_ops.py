@@ -524,8 +524,16 @@ def _resolved_tmux_shell(session_cwd: str = ".") -> str:
 
 
 async def tmux(
-    args: list[str], timeout_s: int = 10, *, bypass_limit: bool = False
+    args: list[str], timeout_s: int = 10, *, bypass_limit: bool = True
 ) -> CommandResult:
+    """Run a tmux control-plane command.
+
+    Persistent jobs execute inside tmux after ``new-session`` returns.  The short-lived tmux
+    client that creates, probes, or reads those sessions must not queue behind the workload
+    semaphore: a cold batch can legitimately occupy every command slot while still needing the
+    control plane to start or inspect another detached job.  Callers can opt back into the limit
+    for an unusual non-control invocation.
+    """
     selection = resolve_tmux()
     if selection.path is None:
         raise RuntimeError("tmux is unavailable and no bundled helper matches this platform")
@@ -854,8 +862,38 @@ async def _start_shell_unlocked(
         initial,
     ]
     result = await tmux(cmd)
+    recovered_start = False
     if not result.ok:
-        raise RuntimeError(result.stderr or result.stdout)
+        # A timed-out tmux client does not prove that the server rejected new-session.  Under
+        # host or filesystem pressure the request may have reached the server before the client
+        # response was lost.  Confirm the named session before retrying or reporting failure so
+        # callers do not receive a false-negative start and launch a duplicate job.
+        alive = await tmux(
+            ["has-session", "-t", f"={session}"], timeout_s=5, bypass_limit=True
+        )
+        if alive.ok:
+            recovered_start = True
+            audit(
+                "shell_start_recovered",
+                session=session,
+                cwd=str(resolved_cwd),
+                command=initial,
+                backend=f"tmux-{selection.source}",
+                launch_error=(result.stderr or result.stdout).strip(),
+            )
+        else:
+            # Best-effort cleanup covers a server that creates the session immediately after the
+            # failed confirmation.  Exact targeting keeps unrelated sessions untouched.
+            with suppress(Exception):
+                await tmux(
+                    ["kill-session", "-t", f"={session}"],
+                    timeout_s=5,
+                    bypass_limit=True,
+                )
+            detail = (result.stderr or result.stdout).strip()
+            if not detail:
+                detail = "tmux session creation failed without diagnostic output"
+            raise RuntimeError(detail)
     if not command:
         alive = await tmux(
             ["has-session", "-t", f"={session}"], timeout_s=5, bypass_limit=True
@@ -873,7 +911,14 @@ async def _start_shell_unlocked(
                 message += f" ({detail})"
             raise RuntimeError(message)
     backend = f"tmux-{selection.source}"
-    audit("shell_start", session=session, cwd=str(resolved_cwd), command=initial, backend=backend)
+    audit(
+        "shell_start",
+        session=session,
+        cwd=str(resolved_cwd),
+        command=initial,
+        backend=backend,
+        recovered=recovered_start,
+    )
     return {
         "session_id": session,
         "cwd": relative_display(resolved_cwd),
@@ -1008,6 +1053,7 @@ async def _tmux_list_shells() -> list[dict]:
             "#{session_name}\t#{session_created}\t#{session_attached}",
         ],
         timeout_s=5,
+        bypass_limit=True,
     )
     if not result.ok:
         # tmux exits nonzero when no server or sessions exist.

@@ -116,7 +116,9 @@ def test_job_runner_arguments_status_and_operations(tmp_path, monkeypatch):
     assert jobs._runner_command(["a", "b c"], "bash") == "a 'b c'"
     assert jobs._runner_command(["a", "b'c"], "powershell.exe").startswith("& ")
     assert "\"b c\"" in jobs._runner_command(["a", "b c"], "cmd.exe")
-    assert jobs._runner_shell_args("pwsh", "x")[-1] == "x"
+    powershell_command = jobs._runner_shell_args("pwsh", "x")[-1]
+    assert "[Console]::OutputEncoding" in powershell_command
+    assert powershell_command.endswith("x")
     assert jobs._runner_shell_args("cmd", "x")[1:3] == ["/S", "/C"]
     assert jobs._runner_shell_args("bash", "x")[-2:] == ["-lc", "x"]
 

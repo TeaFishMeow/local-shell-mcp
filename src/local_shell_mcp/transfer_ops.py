@@ -114,7 +114,10 @@ def _transfer_metadata_path(tmp: Path) -> Path:
 
 def _write_transfer_metadata(tmp: Path, metadata: dict[str, Any]) -> None:
     path = _transfer_metadata_path(tmp)
-    temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
+    # Keep the atomic sibling name independent of the destination name. Remote directory
+    # transfers already use a descriptive archive name plus a transfer UUID; repeating that
+    # full name here can exceed the legacy Windows MAX_PATH limit before os.replace runs.
+    temporary = path.with_name(f".{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
         with contextlib.suppress(OSError):

@@ -104,6 +104,22 @@ async def exercise_websocket(port: int) -> None:
         if b"\x1b" not in switched:
             raise AssertionError("Screen-switch output did not contain ANSI control sequences")
 
+        await drain_websocket(websocket)
+        await websocket.send(json.dumps({"type": "quit"}))
+        deadline = asyncio.get_running_loop().time() + 5
+        while True:
+            try:
+                await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=max(0.01, deadline - asyncio.get_running_loop().time()),
+                )
+            except websockets.ConnectionClosed as exc:
+                if exc.code != 4410:
+                    raise AssertionError(f"TUI quit closed with unexpected code {exc.code}") from exc
+                break
+            except TimeoutError as exc:
+                raise AssertionError("Alt+Q did not close the TUI WebSocket") from exc
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke-test the native OpenTUI PTY WebSocket bridge")

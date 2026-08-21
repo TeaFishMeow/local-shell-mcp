@@ -70,7 +70,7 @@ def test_tmux_normalizes_inherited_shell(tmp_path, monkeypatch):
         "list-sessions",
     ]
     assert captured["env"]["SHELL"] == "/usr/bin/bash"
-    assert captured["bypass_limit"] is False
+    assert captured["bypass_limit"] is True
 
 
 def test_tmux_resolves_relative_configured_shell(tmp_path, monkeypatch):
@@ -202,6 +202,68 @@ def test_start_shell_rejects_session_that_exits_during_startup(tmp_path, monkeyp
 
     assert calls[1] == (["has-session", "-t", "=dead-session"], 5, True)
     assert calls[2] == (["kill-session", "-t", "=dead-session"], 5, True)
+
+
+def test_start_shell_recovers_when_tmux_start_response_times_out(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch)
+    monkeypatch.setattr(shell, "_use_windows_persistent_shell_backend", lambda: False)
+    monkeypatch.setattr(shell, "resolve_tmux", lambda: TmuxSelection("/usr/bin/tmux", "system"))
+    monkeypatch.setattr(shell, "list_shells", lambda: asyncio.sleep(0, result={"sessions": []}))
+    calls = []
+    responses = iter(
+        [
+            _result(ok=False, timed_out=True, stderr="tmux response timed out"),
+            _result(),
+        ]
+    )
+
+    async def fake_tmux(args, timeout_s=10, *, bypass_limit=True):
+        calls.append((args, timeout_s, bypass_limit))
+        return next(responses)
+
+    events = []
+    monkeypatch.setattr(shell, "tmux", fake_tmux)
+    monkeypatch.setattr(shell, "audit", lambda event, **fields: events.append((event, fields)))
+
+    started = asyncio.run(
+        shell._start_shell_unlocked(".", "recovered-session", "sleep 30")
+    )
+
+    assert started["session_id"] == "recovered-session"
+    assert started["backend"] == "tmux-system"
+    assert calls[1] == (["has-session", "-t", "=recovered-session"], 5, True)
+    assert [event for event, _fields in events] == [
+        "shell_start_recovered",
+        "shell_start",
+    ]
+    assert events[-1][1]["recovered"] is True
+
+
+def test_start_shell_cleans_unconfirmed_tmux_session(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch)
+    monkeypatch.setattr(shell, "_use_windows_persistent_shell_backend", lambda: False)
+    monkeypatch.setattr(shell, "resolve_tmux", lambda: TmuxSelection("/usr/bin/tmux", "system"))
+    monkeypatch.setattr(shell, "list_shells", lambda: asyncio.sleep(0, result={"sessions": []}))
+    calls = []
+    responses = iter(
+        [
+            _result(ok=False, timed_out=True, stderr="tmux response timed out"),
+            _result(ok=False, stderr="session missing"),
+            _result(ok=False, stderr="session missing"),
+        ]
+    )
+
+    async def fake_tmux(args, timeout_s=10, *, bypass_limit=True):
+        calls.append((args, timeout_s, bypass_limit))
+        return next(responses)
+
+    monkeypatch.setattr(shell, "tmux", fake_tmux)
+
+    with pytest.raises(RuntimeError, match="tmux response timed out"):
+        asyncio.run(shell._start_shell_unlocked(".", "unconfirmed-session", "sleep 30"))
+
+    assert calls[1] == (["has-session", "-t", "=unconfirmed-session"], 5, True)
+    assert calls[2] == (["kill-session", "-t", "=unconfirmed-session"], 5, True)
 
 
 def test_start_shell_allows_explicit_command_to_finish_immediately(tmp_path, monkeypatch):

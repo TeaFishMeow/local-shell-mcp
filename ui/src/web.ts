@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import { Terminal } from "@xterm/xterm"
 import { parseWebClipboardPayload, WEB_CLIPBOARD_OSC } from "./clipboard-protocol"
 import { createImageAddon } from "./image-support"
-import { browserSelectionShortcut, browserShortcutSequence } from "./keyboard"
+import { BROWSER_QUIT_SEQUENCE, browserSelectionShortcut, browserShortcutSequence } from "./keyboard"
 import { measureTerminalCellAspect } from "./terminal-geometry"
 import { TerminalWriteBuffer, type TerminalWriteChunk } from "./terminal-write-buffer"
 import { visibleWorkloadCount } from "./web-data"
@@ -818,6 +818,17 @@ function resetTerminalOutputHold(): void {
   terminal?.clearSelection()
 }
 
+function terminalScreenContains(needle: string): boolean {
+  if (!terminal) return false
+  const buffer = terminal.buffer.active
+  const first = Math.max(0, buffer.viewportY)
+  const last = Math.min(buffer.length, first + terminal.rows)
+  for (let index = first; index < last; index += 1) {
+    if (buffer.getLine(index)?.translateToString(true).includes(needle)) return true
+  }
+  return false
+}
+
 function setPublishedClipboard(value: string | null): void {
   publishedClipboardValue = value
   terminalCopyButton.hidden = value === null
@@ -1141,7 +1152,10 @@ window.addEventListener("keydown", (event) => {
   if (!sequence || socket?.readyState !== WebSocket.OPEN) return
   event.preventDefault()
   event.stopImmediatePropagation()
-  socket.send(encoder.encode(sequence))
+  if (sequence === BROWSER_QUIT_SEQUENCE && !terminalScreenContains("RAW INPUT")) {
+    socket.send(JSON.stringify({ type: "quit" }))
+  }
+  else socket.send(encoder.encode(sequence))
 }, { capture: true })
 
 reconnectButton.addEventListener("click", () => {

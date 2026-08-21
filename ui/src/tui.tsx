@@ -119,8 +119,12 @@ function App() {
 
   useKeyboard((key) => {
     if (terminalRawMode) return
-    if ((key.option || key.meta) && key.name === "q") {
+    if (((key.option || key.meta) && key.name === "q") || key.name === "f10") {
       renderer.destroy()
+      // renderer.destroy() removes the timer machinery that would run a
+      // deferred exit, while Bun's compiled Windows process can still remain
+      // alive on native handles. Teardown is synchronous, so exit immediately.
+      process.exit(0)
       return
     }
     if (help || interactionLocked) return

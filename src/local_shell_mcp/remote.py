@@ -1439,11 +1439,21 @@ async def _execute_environment_worker_tool(tool: str, args: dict[str, Any]) -> A
         public_settings = safe_settings_dump()
         public_settings["default_timeout_s"] = PUBLIC_RUN_SHELL_DEFAULT_TIMEOUT_S
         public_settings["max_timeout_s"] = PUBLIC_RUN_SHELL_TIMEOUT_CAP_S
-        python = quote_shell_argument(get_settings().python_bin)
-        git = quote_shell_argument(get_settings().git_bin)
+        python = quote_shell_executable(get_settings().python_bin)
+        git = quote_shell_executable(get_settings().git_bin)
+        probe = (
+            "$PSVersionTable.PSVersion.ToString(); Write-Output '---'; "
+            "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+            "Write-Output '---'; (Get-Location).Path; Write-Output '---'; "
+            f"{python} --version; {git} --version"
+            if os.name == "nt"
+            else (
+                "uname -a; echo '---'; id; echo '---'; pwd; echo '---'; "
+                f"{python} --version; {git} --version"
+            )
+        )
         result = await run_shell(
-            f"uname -a; echo '---'; id; echo '---'; pwd; echo '---'; "
-            f"{python} --version; {git} --version",
+            probe,
             cwd=".",
             timeout_s=10,
         )

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import inspect
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -2435,11 +2436,21 @@ def _register_environment_tools(
             public_settings = safe_settings_dump(settings)
             public_settings["default_timeout_s"] = PUBLIC_RUN_SHELL_DEFAULT_TIMEOUT_S
             public_settings["max_timeout_s"] = PUBLIC_RUN_SHELL_TIMEOUT_CAP_S
-            python = quote_shell_argument(settings.python_bin)
-            git = quote_shell_argument(settings.git_bin)
+            python = quote_shell_executable(settings.python_bin)
+            git = quote_shell_executable(settings.git_bin)
+            probe = (
+                "$PSVersionTable.PSVersion.ToString(); Write-Output '---'; "
+                "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+                "Write-Output '---'; (Get-Location).Path; Write-Output '---'; "
+                f"{python} --version; {git} --version"
+                if os.name == "nt"
+                else (
+                    "uname -a; echo '---'; id; echo '---'; pwd; echo '---'; "
+                    f"{python} --version; {git} --version"
+                )
+            )
             result = await run_shell(
-                f"uname -a; echo '---'; id; echo '---'; pwd; echo '---'; "
-                f"{python} --version; {git} --version",
+                probe,
                 cwd=".",
                 timeout_s=10,
             )
@@ -3475,7 +3486,11 @@ def build_mcp() -> FastMCP:
         openWorldHint=False,
     )
 
-    if settings.ui_enabled and settings.mode != "stdio":
+    if (
+        settings.ui_enabled
+        and settings.live_workspace_enabled
+        and settings.mode != "stdio"
+    ):
         _register_live_workspace_tools(mcp, settings)
     _register_environment_tools(mcp, settings, read_only_tool)
     _register_command_tools(mcp, settings)
